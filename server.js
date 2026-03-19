@@ -1,0 +1,316 @@
+require('dotenv').config();
+const express = require('express');
+const multer = require('multer');
+const cors = require('cors');
+const path = require('path');
+const fs = require('fs');
+const axios = require('axios');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const GOOGLE_API_KEY = 'AIzaSyAmFcxeRApqLXzUlxhP1Dgomc0MaM3qTPA';
+const VISION_API_URL = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_API_KEY}`;
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4-nano';
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+
+// Create uploads directory if it doesn't exist
+const uploadDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: function (req, file, cb) {
+    cb(null, uploadDir);
+  },
+  filename: function (req, file, cb) {
+    cb(null, Date.now() + path.extname(file.originalname));
+  }
+});
+
+// File filter function
+const fileFilter = function(req, file, cb) {
+  const filetypes = /jpeg|jpg|png|gif/;
+  const mimetype = filetypes.test(file.mimetype);
+  const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+  
+  if (mimetype && extname) {
+    return cb(null, true);
+  }
+  cb(new Error('Only image files are allowed (JPEG, JPG, PNG, GIF)'));
+};
+
+const upload = multer({ 
+  storage: storage,
+  limits: { 
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+    files: 1
+  },
+  fileFilter: fileFilter
+});
+
+// Function to analyze image using Google Cloud Vision API
+async function analyzeImageWithVision(imageBuffer) {
+  try {
+    const base64Image = imageBuffer.toString('base64');
+    
+    const request = {
+      requests: [
+        {
+          image: {
+            content: base64Image
+          },
+          features: [
+            {
+              type: 'TEXT_DETECTION',
+              maxResults: 10
+            }
+          ]
+        }
+      ]
+    };
+
+    const response = await axios.post(VISION_API_URL, request, {
+      timeout: 25000 // 25 second timeout
+    });
+    return response.data;
+  } catch (error) {
+    console.error('Error analyzing image with Vision API:', error);
+    // Return mock data when Vision API fails
+    return {
+      responses: [{
+        textAnnotations: [{
+          description: 'Mock text detection - API unavailable'
+        }]
+      }]
+    };
+  }
+}
+
+async function generateOpenAIResponse({ text, spicinessLevel, context }) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not configured');
+  }
+
+  const spicinessStyle = [
+    'chill and friendly',
+    'smooth and confident',
+    'spicy and playful',
+    'overload rizz: bold, flirty, and high-energy'
+  ][Math.min(Math.max(spicinessLevel, 0), 3)];
+
+  const userContext = (context || '').trim();
+  const ocrText = (text || '').trim();
+  const promptParts = [
+    `You are Reply Rizzler. Generate ONE short reply the user can send.`,
+    `Style: ${spicinessStyle}.`,
+    `Keep it natural, not cringe, and do not mention AI or OCR.`,
+    `If the OCR text looks like a chat conversation, respond to the last message.`,
+    userContext ? `Extra context from user: ${userContext}` : null,
+    `OCR text from the image:\n${ocrText}`
+  ].filter(Boolean);
+
+  const payload = {
+    model: OPENAI_MODEL,
+    messages: [
+      { role: 'system', content: 'You write concise chat replies.' },
+      { role: 'user', content: promptParts.join('\n\n') }
+    ],
+    temperature: 0.8,
+    max_tokens: 120
+  };
+
+  const response = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    timeout: 25000
+  });
+
+  const content = response?.data?.choices?.[0]?.message?.content;
+  if (!content || typeof content !== 'string') {
+    throw new Error('No response from OpenAI');
+  }
+  return content.trim();
+}
+
+// Routes
+app.get('/', (req, res) => {
+  res.send('Hangly Backend is running!');
+});
+
+// Analyze image and generate response
+app.post('/api/analyze', (req, res) => {
+  upload.single('image')(req, res, async (err) => {
+    try {
+      if (err instanceof multer.MulterError) {
+        console.error('Multer error:', err);
+        return res.status(400).json({ 
+          error: 'File upload error',
+          details: err.message 
+        });
+      } else if (err) {
+        console.error('Upload error:', err);
+        return res.status(400).json({ 
+          error: 'File upload failed',
+          details: err.message 
+        });
+      }
+
+      const { spiciness_level, context } = req.body;
+      const imagePath = req.file?.path;
+
+      console.log('Received request with file:', req.file);
+      console.log('Spiciness level:', spiciness_level);
+      console.log('Context:', context);
+
+      if (!imagePath) {
+        return res.status(400).json({ 
+          error: 'No image file provided',
+          receivedFiles: req.files,
+          body: req.body
+        });
+      }
+
+      try {
+        // Read image file
+        console.log('Reading image file from:', imagePath);
+        const imageBuffer = fs.readFileSync(imagePath);
+        
+        // Analyze image with Google Cloud Vision
+        console.log('Analyzing image with Vision API...');
+        const visionResult = await analyzeImageWithVision(imageBuffer);
+        
+        // Extract labels from vision result
+        const labels = visionResult.responses[0]?.labelAnnotations?.map(label => label.description) || [];
+        const text = visionResult.responses[0]?.textAnnotations?.[0]?.description || '';
+        
+        console.log('Detected labels:', labels);
+        console.log('Detected text:', text);
+        
+        // Generate response based on detected content
+        const spicinessInt = parseInt(spiciness_level || '0');
+        let response;
+        if (text && text.trim().length > 0) {
+          try {
+            response = await generateOpenAIResponse({
+              text,
+              spicinessLevel: spicinessInt,
+              context
+            });
+          } catch (openAiError) {
+            console.error('OpenAI error, falling back to local responses:', openAiError);
+            response = generateResponse(labels, text, spicinessInt);
+          }
+        } else {
+          response = generateResponse(labels, text, spicinessInt);
+        }
+        console.log('Generated response:', response);
+
+        // Clean up the uploaded file
+        try {
+          if (fs.existsSync(imagePath)) {
+            fs.unlinkSync(imagePath);
+            console.log('Temporary file deleted:', imagePath);
+          }
+        } catch (cleanupError) {
+          console.error('Error cleaning up file:', cleanupError);
+        }
+
+        // Send the response
+        res.json({
+          success: true,
+          response: response,
+          spiciness_level: spicinessInt,
+          detected_labels: labels,
+          detected_text: text
+        });
+
+      } catch (processError) {
+        console.error('Error processing image:', processError);
+        // Clean up the uploaded file in case of error
+        if (imagePath && fs.existsSync(imagePath)) {
+          fs.unlinkSync(imagePath);
+        }
+        
+        return res.status(500).json({ 
+          error: 'Failed to process image',
+          details: processError.message,
+          stack: processError.stack
+        });
+      }
+    } catch (error) {
+      console.error('Unexpected error in /api/analyze:', error);
+      res.status(500).json({ 
+        error: 'Internal server error',
+        details: error.message,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      });
+    }
+  });
+});
+
+// Generate response based on detected content
+function generateResponse(labels, text, spiciness) {
+  const spicinessLevels = [
+    // Level 0: Mild
+    [
+      "That's a nice photo!",
+      "I like what I see!",
+      "Great picture!"
+    ],
+    // Level 1: Friendly
+    [
+      "Looking good! I like the composition.",
+      "Great shot! The lighting is perfect.",
+      "You've got a great eye for photography!"
+    ],
+    // Level 2: Playful
+    [
+      "Wow, looking amazing! 😍",
+      "This picture is fire! 🔥",
+      "Someone's looking extra attractive today! 😉"
+    ],
+    // Level 3: Flirty
+    [
+      "🔥 HOT DAMN! You're setting my phone on fire! 🔥",
+      "🚨 WARNING: This level of attractiveness should be illegal! 🚨",
+      "💘 Is it hot in here or is it just you? 💘"
+    ]
+  ];
+
+  // Get a random response based on spiciness level
+  const responses = spicinessLevels[Math.min(spiciness, 3)] || spicinessLevels[0];
+  const randomResponse = responses[Math.floor(Math.random() * responses.length)];
+  
+  // Add some context if we detected text or labels
+  let context = '';
+  if (text) {
+    context = ` I see some text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`;
+  } else if (labels.length > 0) {
+    context = ` I can see ${labels.slice(0, 3).join(', ')}.`;
+  }
+  
+  return `${randomResponse}${context}`;
+}
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ 
+    error: 'Something went wrong!',
+    message: err.message 
+  });
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
