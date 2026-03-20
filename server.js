@@ -39,6 +39,49 @@ console.log('Vision auth mode:', visionClient ? 'service_account' : (VISION_API_
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+const OPENAI_MODEL_FALLBACKS = (process.env.OPENAI_MODEL_FALLBACKS || 'gpt-4o-mini,gpt-4o,gpt-3.5-turbo')
+  .split(',')
+  .map(s => s.trim())
+  .filter(Boolean);
+
+async function callOpenAIChatCompletionsWithFallback(payload, { preferredModel }) {
+  if (!OPENAI_API_KEY) {
+    throw new Error('OPENAI_API_KEY is not configured');
+  }
+
+  const modelsToTry = [preferredModel, ...OPENAI_MODEL_FALLBACKS]
+    .filter(Boolean)
+    .filter((m, i, arr) => arr.indexOf(m) === i);
+
+  let lastError = null;
+  for (const model of modelsToTry) {
+    try {
+      const response = await axios.post(
+        'https://api.openai.com/v1/chat/completions',
+        { ...payload, model },
+        {
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            'Content-Type': 'application/json'
+          },
+          timeout: 25000
+        }
+      );
+      return response;
+    } catch (err) {
+      lastError = err;
+      const status = err?.response?.status;
+      const msg = err?.response?.data?.error?.message || err?.message || '';
+      const isModelAccessDenied = status === 403 && /does not have access to model/i.test(msg);
+      if (isModelAccessDenied) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastError || new Error('OpenAI request failed');
+}
 
 // Middleware
 app.use(cors());
@@ -154,7 +197,6 @@ async function generateOpenAIResponse({ text, spicinessLevel, context }) {
   ].filter(Boolean);
 
   const payload = {
-    model: OPENAI_MODEL,
     messages: [
       { role: 'system', content: 'You write concise chat replies.' },
       { role: 'user', content: promptParts.join('\n\n') }
@@ -163,13 +205,7 @@ async function generateOpenAIResponse({ text, spicinessLevel, context }) {
     max_tokens: 120
   };
 
-  const response = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    timeout: 25000
-  });
+  const response = await callOpenAIChatCompletionsWithFallback(payload, { preferredModel: OPENAI_MODEL });
 
   const content = response?.data?.choices?.[0]?.message?.content;
   if (!content || typeof content !== 'string') {
@@ -222,7 +258,6 @@ app.post('/api/glowup', async (req, res) => {
     ].join('\n\n');
 
     const payload = {
-      model: OPENAI_MODEL,
       messages: [
         { role: 'system', content: 'You rewrite short messages for texting.' },
         { role: 'user', content: prompt }
@@ -231,13 +266,7 @@ app.post('/api/glowup', async (req, res) => {
       max_tokens: 200
     };
 
-    const response = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      timeout: 25000
-    });
+    const response = await callOpenAIChatCompletionsWithFallback(payload, { preferredModel: OPENAI_MODEL });
 
     const content = response?.data?.choices?.[0]?.message?.content;
     if (!content || typeof content !== 'string') {
