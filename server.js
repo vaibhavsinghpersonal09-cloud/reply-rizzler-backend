@@ -5,11 +5,37 @@ const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
 const axios = require('axios');
+const vision = require('@google-cloud/vision');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const GOOGLE_API_KEY = 'AIzaSyAmFcxeRApqLXzUlxhP1Dgomc0MaM3qTPA';
-const VISION_API_URL = `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_API_KEY}`;
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const VISION_API_URL = GOOGLE_API_KEY
+  ? `https://vision.googleapis.com/v1/images:annotate?key=${GOOGLE_API_KEY}`
+  : null;
+
+const GOOGLE_APPLICATION_CREDENTIALS_JSON = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+let visionClient = null;
+if (GOOGLE_APPLICATION_CREDENTIALS_JSON) {
+  try {
+    let credsObj;
+    try {
+      credsObj = JSON.parse(GOOGLE_APPLICATION_CREDENTIALS_JSON);
+    } catch (_) {
+      const decoded = Buffer.from(GOOGLE_APPLICATION_CREDENTIALS_JSON, 'base64').toString('utf8');
+      credsObj = JSON.parse(decoded);
+    }
+
+    visionClient = new vision.ImageAnnotatorClient({
+      credentials: credsObj
+    });
+  } catch (e) {
+    console.error('Failed to initialize Google Vision client from GOOGLE_APPLICATION_CREDENTIALS_JSON:', e?.message || e);
+    visionClient = null;
+  }
+}
+
+console.log('Vision auth mode:', visionClient ? 'service_account' : (VISION_API_URL ? 'api_key' : 'not_configured'));
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4-nano';
@@ -59,7 +85,19 @@ const upload = multer({
 async function analyzeImageWithVision(imageBuffer) {
   try {
     const base64Image = imageBuffer.toString('base64');
-    
+
+    if (visionClient) {
+      const [result] = await visionClient.annotateImage({
+        image: { content: base64Image },
+        features: [{ type: 'TEXT_DETECTION', maxResults: 10 }]
+      });
+      return { responses: [result] };
+    }
+
+    if (!VISION_API_URL) {
+      throw new Error('Google Vision credentials are not configured (set GOOGLE_APPLICATION_CREDENTIALS_JSON or GOOGLE_API_KEY)');
+    }
+
     const request = {
       requests: [
         {
@@ -81,15 +119,14 @@ async function analyzeImageWithVision(imageBuffer) {
     });
     return response.data;
   } catch (error) {
-    console.error('Error analyzing image with Vision API:', error);
-    // Return mock data when Vision API fails
-    return {
-      responses: [{
-        textAnnotations: [{
-          description: 'Mock text detection - API unavailable'
-        }]
-      }]
-    };
+    const status = error?.response?.status;
+    const data = error?.response?.data;
+    console.error('Error analyzing image with Vision API:', {
+      message: error?.message,
+      status,
+      data
+    });
+    throw error;
   }
 }
 
@@ -144,6 +181,83 @@ async function generateOpenAIResponse({ text, spicinessLevel, context }) {
 // Routes
 app.get('/', (req, res) => {
   res.send('Hangly Backend is running!');
+});
+
+app.post('/api/glowup', async (req, res) => {
+  try {
+    const { message, tone, include_emojis } = req.body || {};
+
+    const msg = (message || '').toString().trim();
+    const toneStr = (tone || '').toString().trim();
+    const includeEmojis = include_emojis === true;
+
+    if (!msg) {
+      return res.status(400).json({
+        success: false,
+        error: 'Message is required',
+        message: 'Message is required'
+      });
+    }
+
+    if (!OPENAI_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: 'OPENAI_API_KEY is not configured',
+        message: 'OPENAI_API_KEY is not configured'
+      });
+    }
+
+    const toneInstruction = toneStr ? `Tone: ${toneStr}.` : 'Tone: neutral.';
+    const emojiInstruction = includeEmojis
+      ? 'You may add a few tasteful emojis where they fit naturally.'
+      : 'Do not add any emojis.';
+
+    const prompt = [
+      'Improve the user\'s message to be more engaging, clear, and polished.',
+      toneInstruction,
+      emojiInstruction,
+      'Keep the meaning the same. Keep it natural (not cringe).',
+      'Return only the improved message, no quotes, no explanations.',
+      `User message:\n${msg}`
+    ].join('\n\n');
+
+    const payload = {
+      model: OPENAI_MODEL,
+      messages: [
+        { role: 'system', content: 'You rewrite short messages for texting.' },
+        { role: 'user', content: prompt }
+      ],
+      temperature: 0.7,
+      max_tokens: 200
+    };
+
+    const response = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 25000
+    });
+
+    const content = response?.data?.choices?.[0]?.message?.content;
+    if (!content || typeof content !== 'string') {
+      throw new Error('No response from OpenAI');
+    }
+
+    return res.json({
+      success: true,
+      improved_message: content.trim(),
+      tone: toneStr,
+      include_emojis: includeEmojis
+    });
+  } catch (error) {
+    console.error('Unexpected error in /api/glowup:', error);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to glow up message',
+      message: error?.message || 'Failed to glow up message'
+    });
+  }
 });
 
 // Analyze image and generate response
@@ -239,10 +353,19 @@ app.post('/api/analyze', (req, res) => {
         if (imagePath && fs.existsSync(imagePath)) {
           fs.unlinkSync(imagePath);
         }
+
+        const upstreamStatus = processError?.response?.status;
+        const upstreamData = processError?.response?.data;
+        const upstreamMessage =
+          upstreamData?.error?.message ||
+          upstreamData?.error?.status ||
+          (typeof upstreamData === 'string' ? upstreamData : null);
         
         return res.status(500).json({ 
           error: 'Failed to process image',
-          details: processError.message,
+          message: upstreamMessage || processError.message,
+          details: upstreamData || processError.message,
+          upstream_status: upstreamStatus,
           stack: processError.stack
         });
       }
@@ -250,6 +373,7 @@ app.post('/api/analyze', (req, res) => {
       console.error('Unexpected error in /api/analyze:', error);
       res.status(500).json({ 
         error: 'Internal server error',
+        message: error.message,
         details: error.message,
         stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
