@@ -38,7 +38,7 @@ if (GOOGLE_APPLICATION_CREDENTIALS_JSON) {
 console.log('Vision auth mode:', visionClient ? 'service_account' : (VISION_API_URL ? 'api_key' : 'not_configured'));
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4-nano';
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
 // Middleware
 app.use(cors());
@@ -251,11 +251,26 @@ app.post('/api/glowup', async (req, res) => {
       include_emojis: includeEmojis
     });
   } catch (error) {
-    console.error('Unexpected error in /api/glowup:', error);
+    const upstreamStatus = error?.response?.status;
+    const upstreamData = error?.response?.data;
+    const upstreamMessage =
+      upstreamData?.error?.message ||
+      upstreamData?.error?.type ||
+      upstreamData?.error?.code ||
+      (typeof upstreamData === 'string' ? upstreamData : null);
+
+    console.error('Unexpected error in /api/glowup:', {
+      message: error?.message,
+      upstream_status: upstreamStatus,
+      upstream_message: upstreamMessage,
+      upstream_data: upstreamData
+    });
     return res.status(500).json({
       success: false,
       error: 'Failed to glow up message',
-      message: error?.message || 'Failed to glow up message'
+      message: upstreamMessage || error?.message || 'Failed to glow up message',
+      details: upstreamData || error?.message,
+      upstream_status: upstreamStatus
     });
   }
 });
