@@ -35,6 +35,165 @@ if (GOOGLE_APPLICATION_CREDENTIALS_JSON) {
   }
 }
 
+function detectIndianChatLanguage(text) {
+  const t = (text || '').toString();
+  if (!t.trim()) return 'hinglish';
+
+  const devanagariMatches = t.match(/[\u0900-\u097F]/g) || [];
+  const latinMatches = t.match(/[A-Za-z]/g) || [];
+  const totalLetters = devanagariMatches.length + latinMatches.length;
+
+  if (totalLetters === 0) return 'hinglish';
+
+  const devanagariRatio = devanagariMatches.length / totalLetters;
+  if (devanagariRatio > 0.55) return 'hindi';
+
+  const hinglishSignals = [
+    /\b(yaar|yr|bro|bhai|behen|bhen|didi|babu|jaan|ya|kyu|kyun|kya|kaise|nahi|haan|haa|ha|matlab|scene|vibe|chal|arey|arrey|hoga|nhi|nai)\b/i,
+    /\b(lol|lmao|bruh|vibe|scene|sahi|mast|pagal|crazy)\b/i
+  ];
+  const hasHinglishSignal = hinglishSignals.some((re) => re.test(t));
+  if (hasHinglishSignal) return 'hinglish';
+
+  return 'english';
+}
+
+function pickReplyLengthHint(spicinessLevel) {
+  const lvl = Number.isFinite(Number(spicinessLevel)) ? Number(spicinessLevel) : 1;
+  const clamped = Math.min(Math.max(lvl, 1), 3);
+  if (clamped === 1) return '1 short line (max ~12 words).';
+  if (clamped === 2) return '1-2 short lines (max ~20 words).';
+  return '1-2 short lines (max ~22 words).';
+}
+
+function spiceStyleGuide(spicinessLevel) {
+  const lvl = Number.isFinite(Number(spicinessLevel)) ? Number(spicinessLevel) : 1;
+  const clamped = Math.min(Math.max(lvl, 1), 3);
+  return {
+    1: 'sweet, confident, low-key charming. Safe and not over-flirty.',
+    2: 'playful banter, light tease, clear interest. Still classy.',
+    3: 'high-rizz, bold flirt, witty. Spicy but not vulgar, no explicit sexual content.'
+  }[clamped];
+}
+
+function buildReplyRizzlerPrompt({ ocrText, userContext, spicinessLevel }) {
+  const ocr = (ocrText || '').toString().trim();
+  const ctx = (userContext || '').toString().trim();
+  const combined = [ocr, ctx].filter(Boolean).join('\n');
+  const lang = detectIndianChatLanguage(combined);
+  const lengthHint = pickReplyLengthHint(spicinessLevel);
+  const spiceGuide = spiceStyleGuide(spicinessLevel);
+
+  const languageRule =
+    lang === 'hindi'
+      ? 'Write in Hindi (Devanagari).'
+      : lang === 'hinglish'
+        ? 'Write in Hinglish (Hindi in Latin letters + a bit of English, like Indian Gen Z texting).'
+        : 'Write in English, but keep it India-friendly (natural texting).';
+
+  return {
+    lang,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are Reply Rizzler — you generate ONE reply message for Indian Gen Z texting.',
+          'Never mention AI, OCR, analysis, or policy.',
+          'No cringe, no try-hard pickup lines, no overuse of emojis.',
+          'No slurs. No explicit sexual content. Keep it respectful.',
+          'Do NOT add quotes. Output ONLY the final reply text.'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          `Goal: craft ONE reply to the last message in this chat screenshot text.`,
+          `Language: ${languageRule}`,
+          `Vibe: ${spiceGuide}`,
+          `Length: ${lengthHint}`,
+          'Important: Match the chat’s vibe (formal/informal), and mirror any slang level naturally.',
+          ctx ? `Extra context from user (may be important):\n${ctx}` : null,
+          `Chat text (OCR):\n${ocr || '(empty)'}`
+        ].filter(Boolean).join('\n\n')
+      }
+    ]
+  };
+}
+
+function buildGlowUpPrompt({ message, tone, includeEmojis }) {
+  const msg = (message || '').toString().trim();
+  const toneStr = (tone || '').toString().trim();
+  const lang = detectIndianChatLanguage(msg);
+
+  const languageRule =
+    lang === 'hindi'
+      ? 'Write in Hindi (Devanagari).'
+      : lang === 'hinglish'
+        ? 'Write in Hinglish (Hindi in Latin letters + a bit of English, like Indian Gen Z texting).'
+        : 'Write in English, but keep it India-friendly (natural texting).';
+
+  const emojiRule = includeEmojis
+    ? 'You may add 1-3 emojis total if they fit naturally (not on every word).'
+    : 'Do not add any emojis.';
+
+  const toneRule = toneStr
+    ? `Tone: ${toneStr} (keep it natural for Indian Gen Z texting).`
+    : 'Tone: neutral and friendly (Indian Gen Z texting).';
+
+  return {
+    lang,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You rewrite short messages to sound better for texting in India.',
+          'Never mention AI, instructions, or analysis.',
+          'Keep meaning the same; do not add new facts.',
+          'No cringe; keep it human.',
+          'Output ONLY the improved message text. No quotes. No bullet points.'
+        ].join('\n')
+      },
+      {
+        role: 'user',
+        content: [
+          `Task: Improve this message for sending on Insta/WhatsApp/dating apps.`,
+          `Language: ${languageRule}`,
+          toneRule,
+          emojiRule,
+          'Keep it concise and smooth.',
+          `Original message:\n${msg}`
+        ].join('\n\n')
+      }
+    ]
+  };
+}
+
+function sanitizeSingleTextReply(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  let s = raw.trim();
+
+  // Remove code fences if the model accidentally returns them
+  s = s.replace(/^```[a-zA-Z]*\s*/g, '').replace(/```\s*$/g, '').trim();
+
+  // Remove surrounding quotes
+  if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith('\'') && s.endsWith('\''))) {
+    s = s.slice(1, -1).trim();
+  }
+
+  // If multiple lines are returned, keep the first meaningful 1-2 lines
+  const lines = s
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  if (lines.length === 0) return '';
+  if (lines.length === 1) return lines[0];
+
+  // Keep up to 2 lines max (still feels like a single chat message)
+  return `${lines[0]}\n${lines[1]}`.trim();
+}
+
 console.log('Vision auth mode:', visionClient ? 'service_account' : (VISION_API_URL ? 'api_key' : 'not_configured'));
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -178,30 +337,17 @@ async function generateOpenAIResponse({ text, spicinessLevel, context }) {
     throw new Error('OPENAI_API_KEY is not configured');
   }
 
-  const spicinessStyle = [
-    'chill and friendly',
-    'smooth and confident',
-    'spicy and playful',
-    'overload rizz: bold, flirty, and high-energy'
-  ][Math.min(Math.max(spicinessLevel, 0), 3)];
-
-  const userContext = (context || '').trim();
-  const ocrText = (text || '').trim();
-  const promptParts = [
-    `You are Reply Rizzler. Generate ONE short reply the user can send.`,
-    `Style: ${spicinessStyle}.`,
-    `Keep it natural, not cringe, and do not mention AI or OCR.`,
-    `If the OCR text looks like a chat conversation, respond to the last message.`,
-    userContext ? `Extra context from user: ${userContext}` : null,
-    `OCR text from the image:\n${ocrText}`
-  ].filter(Boolean);
+  const userContext = (context || '').toString().trim();
+  const ocrText = (text || '').toString().trim();
+  const prompt = buildReplyRizzlerPrompt({
+    ocrText,
+    userContext,
+    spicinessLevel
+  });
 
   const payload = {
-    messages: [
-      { role: 'system', content: 'You write concise chat replies.' },
-      { role: 'user', content: promptParts.join('\n\n') }
-    ],
-    temperature: 0.8,
+    messages: prompt.messages,
+    temperature: 0.65,
     max_tokens: 120
   };
 
@@ -211,7 +357,11 @@ async function generateOpenAIResponse({ text, spicinessLevel, context }) {
   if (!content || typeof content !== 'string') {
     throw new Error('No response from OpenAI');
   }
-  return content.trim();
+  const cleaned = sanitizeSingleTextReply(content);
+  if (!cleaned) {
+    throw new Error('Empty response from OpenAI');
+  }
+  return cleaned;
 }
 
 // Routes
@@ -225,7 +375,7 @@ app.post('/api/glowup', async (req, res) => {
 
     const msg = (message || '').toString().trim();
     const toneStr = (tone || '').toString().trim();
-    const includeEmojis = include_emojis === true;
+    const includeEmojis = include_emojis === true || include_emojis === 'true' || include_emojis === 1 || include_emojis === '1';
 
     if (!msg) {
       return res.status(400).json({
@@ -243,26 +393,15 @@ app.post('/api/glowup', async (req, res) => {
       });
     }
 
-    const toneInstruction = toneStr ? `Tone: ${toneStr}.` : 'Tone: neutral.';
-    const emojiInstruction = includeEmojis
-      ? 'You may add a few tasteful emojis where they fit naturally.'
-      : 'Do not add any emojis.';
-
-    const prompt = [
-      'Improve the user\'s message to be more engaging, clear, and polished.',
-      toneInstruction,
-      emojiInstruction,
-      'Keep the meaning the same. Keep it natural (not cringe).',
-      'Return only the improved message, no quotes, no explanations.',
-      `User message:\n${msg}`
-    ].join('\n\n');
+    const glowPrompt = buildGlowUpPrompt({
+      message: msg,
+      tone: toneStr,
+      includeEmojis
+    });
 
     const payload = {
-      messages: [
-        { role: 'system', content: 'You rewrite short messages for texting.' },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.7,
+      messages: glowPrompt.messages,
+      temperature: 0.55,
       max_tokens: 200
     };
 
@@ -273,9 +412,14 @@ app.post('/api/glowup', async (req, res) => {
       throw new Error('No response from OpenAI');
     }
 
+    const cleaned = sanitizeSingleTextReply(content);
+    if (!cleaned) {
+      throw new Error('Empty response from OpenAI');
+    }
+
     return res.json({
       success: true,
-      improved_message: content.trim(),
+      improved_message: cleaned,
       tone: toneStr,
       include_emojis: includeEmojis
     });
@@ -354,21 +498,26 @@ app.post('/api/analyze', (req, res) => {
         console.log('Detected text:', text);
         
         // Generate response based on detected content
-        const spicinessInt = parseInt(spiciness_level || '0');
+        const rawLevel = parseInt(spiciness_level || '1');
+        const spicinessInt = Number.isFinite(rawLevel) ? Math.min(Math.max(rawLevel, 1), 3) : 1;
         let response;
-        if (text && text.trim().length > 0) {
-          try {
-            response = await generateOpenAIResponse({
-              text,
-              spicinessLevel: spicinessInt,
-              context
-            });
-          } catch (openAiError) {
-            console.error('OpenAI error, falling back to local responses:', openAiError);
-            response = generateResponse(labels, text, spicinessInt);
-          }
-        } else {
-          response = generateResponse(labels, text, spicinessInt);
+        if (!text || text.trim().length === 0) {
+          throw new Error('No readable chat text detected in the image. Try a clearer screenshot (crop, increase brightness, avoid blur).');
+        }
+
+        try {
+          response = await generateOpenAIResponse({
+            text,
+            spicinessLevel: spicinessInt,
+            context
+          });
+        } catch (openAiError) {
+          console.error('OpenAI error in /api/analyze:', {
+            message: openAiError?.message,
+            upstream_status: openAiError?.response?.status,
+            upstream_data: openAiError?.response?.data
+          });
+          throw new Error('AI is temporarily unavailable. Please try again in a few seconds.');
         }
         console.log('Generated response:', response);
 
@@ -405,7 +554,8 @@ app.post('/api/analyze', (req, res) => {
           upstreamData?.error?.status ||
           (typeof upstreamData === 'string' ? upstreamData : null);
         
-        return res.status(500).json({ 
+        const statusCode = /No readable chat text detected/i.test(processError?.message || '') ? 400 : 500;
+        return res.status(statusCode).json({ 
           error: 'Failed to process image',
           message: upstreamMessage || processError.message,
           details: upstreamData || processError.message,
@@ -424,50 +574,6 @@ app.post('/api/analyze', (req, res) => {
     }
   });
 });
-
-// Generate response based on detected content
-function generateResponse(labels, text, spiciness) {
-  const spicinessLevels = [
-    // Level 0: Mild
-    [
-      "That's a nice photo!",
-      "I like what I see!",
-      "Great picture!"
-    ],
-    // Level 1: Friendly
-    [
-      "Looking good! I like the composition.",
-      "Great shot! The lighting is perfect.",
-      "You've got a great eye for photography!"
-    ],
-    // Level 2: Playful
-    [
-      "Wow, looking amazing! 😍",
-      "This picture is fire! 🔥",
-      "Someone's looking extra attractive today! 😉"
-    ],
-    // Level 3: Flirty
-    [
-      "🔥 HOT DAMN! You're setting my phone on fire! 🔥",
-      "🚨 WARNING: This level of attractiveness should be illegal! 🚨",
-      "💘 Is it hot in here or is it just you? 💘"
-    ]
-  ];
-
-  // Get a random response based on spiciness level
-  const responses = spicinessLevels[Math.min(spiciness, 3)] || spicinessLevels[0];
-  const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-  
-  // Add some context if we detected text or labels
-  let context = '';
-  if (text) {
-    context = ` I see some text: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`;
-  } else if (labels.length > 0) {
-    context = ` I can see ${labels.slice(0, 3).join(', ')}.`;
-  }
-  
-  return `${randomResponse}${context}`;
-}
 
 // Error handling middleware
 app.use((err, req, res, next) => {
