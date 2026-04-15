@@ -371,11 +371,14 @@ app.get('/', (req, res) => {
 
 app.post('/api/glowup', async (req, res) => {
   try {
-    const { message, tone, include_emojis } = req.body || {};
+    const { message, tone, include_emojis, count } = req.body || {};
 
     const msg = (message || '').toString().trim();
     const toneStr = (tone || '').toString().trim();
     const includeEmojis = include_emojis === true || include_emojis === 'true' || include_emojis === 1 || include_emojis === '1';
+    const requestedCountRaw = Number(count);
+    const requestedCount = Number.isFinite(requestedCountRaw) ? requestedCountRaw : 1;
+    const n = Math.max(1, Math.min(3, Math.floor(requestedCount)));
 
     if (!msg) {
       return res.status(400).json({
@@ -402,26 +405,34 @@ app.post('/api/glowup', async (req, res) => {
     const payload = {
       messages: glowPrompt.messages,
       temperature: 0.55,
-      max_tokens: 200
+      max_tokens: 200,
+      n
     };
 
     const response = await callOpenAIChatCompletionsWithFallback(payload, { preferredModel: OPENAI_MODEL });
 
-    const content = response?.data?.choices?.[0]?.message?.content;
-    if (!content || typeof content !== 'string') {
+    const choices = response?.data?.choices;
+    if (!Array.isArray(choices) || choices.length === 0) {
       throw new Error('No response from OpenAI');
     }
 
-    const cleaned = sanitizeSingleTextReply(content);
-    if (!cleaned) {
+    const improvedMessages = choices
+      .map((c) => c?.message?.content)
+      .filter((c) => typeof c === 'string')
+      .map((c) => sanitizeSingleTextReply(c))
+      .filter(Boolean);
+
+    if (improvedMessages.length === 0) {
       throw new Error('Empty response from OpenAI');
     }
 
     return res.json({
       success: true,
-      improved_message: cleaned,
+      improved_message: improvedMessages[0],
+      improved_messages: improvedMessages.slice(0, n),
       tone: toneStr,
-      include_emojis: includeEmojis
+      include_emojis: includeEmojis,
+      count: n
     });
   } catch (error) {
     const upstreamStatus = error?.response?.status;
