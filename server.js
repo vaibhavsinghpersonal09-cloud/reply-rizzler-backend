@@ -5,7 +5,13 @@ const cors = require('cors');
 const path = require('path');
 const axios = require('axios');
 const vision = require('@google-cloud/vision');
-const { google } = require('googleapis');
+let google = null;
+try {
+  ({ google } = require('googleapis'));
+} catch (e) {
+  console.error('Optional dependency "googleapis" is not available. Google Play subscription verification will be disabled until it is installed.', e?.message || e);
+  google = null;
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -41,6 +47,10 @@ let playPublisherClient = null;
 
 function initPlayPublisherClient() {
   if (!GOOGLE_PLAY_SERVICE_ACCOUNT_JSON) return null;
+  if (!google) {
+    console.error('googleapis is not installed, cannot initialize Google Play Publisher client.');
+    return null;
+  }
   try {
     let credsObj;
     try {
