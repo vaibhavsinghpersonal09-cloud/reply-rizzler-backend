@@ -45,6 +45,8 @@ const ANDROID_PACKAGE_NAME = process.env.ANDROID_PACKAGE_NAME || 'com.hangly.han
 const GOOGLE_PLAY_SERVICE_ACCOUNT_JSON = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON;
 let playPublisherClient = null;
 
+const ENFORCE_PREMIUM = (process.env.ENFORCE_PREMIUM || '').toString().trim().toLowerCase() === 'true';
+
 function initPlayPublisherClient() {
   if (!GOOGLE_PLAY_SERVICE_ACCOUNT_JSON) return null;
   if (!google) {
@@ -85,7 +87,7 @@ const PREMIUM_CACHE_TTL_MS = 2 * 60 * 1000;
 
 async function verifyGooglePlaySubscription({ packageName, productId, purchaseToken }) {
   if (!playPublisherClient) {
-    throw new Error('Google Play verification is not configured (missing GOOGLE_PLAY_SERVICE_ACCOUNT_JSON)');
+    return { isPremium: false, reason: 'not_configured' };
   }
   if (!packageName || !productId || !purchaseToken) {
     return { isPremium: false, reason: 'missing_token' };
@@ -134,12 +136,22 @@ async function verifyGooglePlaySubscription({ packageName, productId, purchaseTo
 
 async function requirePremium(req, res, next) {
   try {
+    if (!ENFORCE_PREMIUM) {
+      req.premium = { isPremium: false, skipped: true, reason: 'enforcement_disabled' };
+      return next();
+    }
+
     const { productId, purchaseToken } = parsePremiumHeaders(req);
     const result = await verifyGooglePlaySubscription({
       packageName: ANDROID_PACKAGE_NAME,
       productId,
       purchaseToken
     });
+
+    if (result?.reason === 'not_configured') {
+      req.premium = { isPremium: false, skipped: true, reason: 'not_configured' };
+      return next();
+    }
 
     if (!result.isPremium) {
       return res.status(402).json({
